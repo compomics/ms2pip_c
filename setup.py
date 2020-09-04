@@ -1,11 +1,13 @@
 import os
+import shlex
 from glob import glob
 
 from setuptools import setup
+from setuptools.command.build_clib import build_clib
+from setuptools.command.develop import develop as st_develop
 from setuptools.extension import Extension
 from Cython.Distutils import build_ext
 import numpy
-
 
 VERSION = "3.6.2"
 
@@ -55,25 +57,35 @@ PYTHON_REQUIRES = ">=3.6,<4"
 with open("README.md", "r") as fh:
     LONG_DESCRIPTION = fh.read()
 
-to_remove = [
-    "ms2pip/cython_modules/ms2pip_pyx.c*",
-    "ms2pip/cython_modules/ms2pip_pyx.so",
-]
-#_ = [[os.remove(f) for f in glob(pat)] for pat in to_remove]
+extra_compile_args = [
+        "-fno-var-tracking",
+        '-Wno-unused-result',
+        "-Og"
+    ]
+
+libms2pip = ('ms2pip', {'sources': ["ms2pip/ms2pip_c/init.c", "ms2pip/ms2pip_c/features.c", "ms2pip/ms2pip_c/peaks.c"] + glob("ms2pip/ms2pip_c/models/*/*.c"), 'cflags': extra_compile_args})
+
+if 'CFLAGS' in os.environ:
+    cflags = shlex.split(os.environ['CFLAGS'])
+    if '-UNDEBUG' not in cflags:
+        extra_compile_args.append('-DCYTHON_WITHOUT_ASSERTIONS')
 
 extensions = [
     Extension(
-        "ms2pip.cython_modules.ms2pip_pyx",
-        sources=["ms2pip/cython_modules/ms2pip_pyx.pyx"] + glob("ms2pip/models/*/*.c"),
-        extra_compile_args=[
-            "-fno-var-tracking",
-            "-Og",
-            "-Wno-unused-result",
-            "-Wno-cpp",
-            "-Wno-unused-function",
-        ],
+        "ms2pip.ms2pip_c.predictions",
+        sources=["ms2pip/ms2pip_c/predictions.pyx"],
+        extra_compile_args=extra_compile_args,
     )
 ]
+
+
+class develop(st_develop):
+    __doc__ = st_develop.__doc__
+
+    def install_for_development(self):
+        self.run_command('build_clib')
+        st_develop.install_for_development(self)
+
 
 setup(
     name=NAME,
@@ -88,7 +100,7 @@ setup(
     project_urls=PROJECT_URLS,
     keywords=KEYWORDS,
     classifiers=CLASSIFIERS,
-    packages=["ms2pip", "ms2pip.ms2pip_tools", "fasta2speclib"],
+    packages=["ms2pip", "ms2pip.ms2pip_c", "ms2pip.ms2pip_tools", "fasta2speclib"],
     include_package_data=True,
     entry_points={
         "console_scripts": [
@@ -98,7 +110,9 @@ setup(
     },
     install_requires=INSTALL_REQUIRES,
     python_requires=PYTHON_REQUIRES,
+    libraries=[libms2pip],
     ext_modules=extensions,
     include_dirs=[numpy.get_include()],
-    cmdclass={"build_ext": build_ext},
+    # library_dirs=[os.path.join(os.path.dirname(__file__), 'ms2pip', 'cython_modules')],
+    cmdclass={"build_clib": build_clib, "build_ext": build_ext, 'develop': develop},
 )
