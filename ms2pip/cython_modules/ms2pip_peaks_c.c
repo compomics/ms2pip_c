@@ -10,7 +10,7 @@
 
 #include "../models/CID.h"
 #include "../models/HCD-2019.h"
-#include "../models/HCD-2021.h"
+// #include "../models/HCD-2021.h"
 #include "../models/HCD-2021-fast.h"
 #include "../models/TTOF5600.h"
 #include "../models/TMT.h"
@@ -114,12 +114,12 @@ float* get_p_ms2pip(int peplen, unsigned short* peptide, unsigned short* modpept
 	}
 
 	// HCD2021
-	else if (model_id == 9) {
-		for (i=0; i < peplen-1; i++) {
-			predictions[0*(peplen-1)+i] = score_HCD2021_B(v+1+(i*fnum))+0.5;
-			predictions[2*(peplen-1)-i-1] = score_HCD2021_Y(v+1+(i*fnum))+0.5;
-		}
-	}
+	//else if (model_id == 9) {
+	//	for (i=0; i < peplen-1; i++) {
+	//		predictions[0*(peplen-1)+i] = score_HCD2021_B(v+1+(i*fnum))+0.5;
+	//		predictions[2*(peplen-1)-i-1] = score_HCD2021_Y(v+1+(i*fnum))+0.5;
+	//	}
+	//}
 
 	// HCD2021fast
 	else if (model_id == 10) {
