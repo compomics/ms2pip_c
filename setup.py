@@ -7,7 +7,7 @@ from Cython.Distutils import build_ext
 import numpy
 
 
-VERSION = "3.6.2"
+VERSION = "3.6.3"
 
 NAME = "ms2pip"
 LICENSE = "apache-2.0"
@@ -48,7 +48,8 @@ INSTALL_REQUIRES = [
     "scipy>=1.2,<2",
     "tqdm>=4,<5",
     "tables>=3.4",
-    "tomlkit>=0.5.11,<1"
+    "tomlkit>=0.5,<1"
+    "sqlalchemy>=1.3,<2"
 ]
 PYTHON_REQUIRES = ">=3.6,<4"
 

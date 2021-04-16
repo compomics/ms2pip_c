@@ -27,11 +27,12 @@ from ms2pip.ms2pip_tools import calc_correlations, spectrum_output
 from ms2pip.peptides import (AMINO_ACID_IDS, Modifications,
                              write_amino_accid_masses)
 from ms2pip.retention_time import RetentionTime
+from ms2pip.predict_xgboost import process_peptides_xgb
 
 logger = logging.getLogger("ms2pip")
 
 # Supported output formats
-SUPPORTED_OUT_FORMATS = ["csv", "mgf", "msp", "bibliospec", "spectronaut"]
+SUPPORTED_OUT_FORMATS = ["csv", "mgf", "msp", "bibliospec", "spectronaut", "dlib"]
 
 # Models and their properties
 # id is passed to get_predictions to select model
@@ -92,7 +93,12 @@ MODELS = {
         "ion_types": ["B", "Y"],
         "peaks_version": "general",
         "features_version": "normal",
+        "xgboost_model_files": {
+            "b": "/home/compomics/ms2pip_c/ms2pip/models_xgboost/Hyperopt_joint_HCDb.xgboost",
+            "y": "/home/compomics/ms2pip_c/ms2pip/models_xgboost/Hyperopt_joint_HCDy.xgboost",
+        }
     },
+
     "HCD2021fast": {
         "id": 10,
         "ion_types": ["B", "Y"],
@@ -100,12 +106,6 @@ MODELS = {
         "features_version": "normal",
     },
 }
-
-
-def pairwise(iterable):
-    "s -> (s0, s1), (s2, s3), (s4, s5), ..."
-    a = iter(iterable)
-    return zip(a, a)
 
 
 def process_peptides(worker_num, data, afile, modfile, modfile2, PTMmap, model):
@@ -147,9 +147,6 @@ def process_peptides(worker_num, data, afile, modfile, modfile2, PTMmap, model):
     charges = specdict["charge"]
     del specdict
 
-    model_id = MODELS[model]["id"]
-    peaks_version = MODELS[model]["peaks_version"]
-
     for pepid in pepids:
         peptide = peptides[pepid]
         peptide = peptide.replace("L", "I")
@@ -162,7 +159,6 @@ def process_peptides(worker_num, data, afile, modfile, modfile2, PTMmap, model):
 
         # Peptides longer then 101 lead to "Segmentation fault (core dumped)"
         if len(peptide) > 100:
-            logger.error("peptide too long: %s", peptide)
             continue
 
         # convert peptide string to integer list to speed up C code
@@ -175,6 +171,9 @@ def process_peptides(worker_num, data, afile, modfile, modfile2, PTMmap, model):
 
         ch = charges[pepid]
         charge_buf.append(ch)
+
+        model_id = MODELS[model]["id"]
+        peaks_version = MODELS[model]["peaks_version"]
 
         # get ion mzs
         mzs = ms2pip_pyx.get_mzs(modpeptide, peaks_version)
@@ -618,20 +617,6 @@ def prepare_titles(titles, num_cpu):
     return split_titles
 
 
-def parse_mods(modstring, PTMmap):
-    if modstring == "-":
-        return []
-    mods = []
-    modstring_parts = modstring.split("|")
-    if len(modstring_parts) % 2 != 0:
-        raise InvalidModificationFormattingError(modstring)
-    for pos, mod in pairwise(modstring_parts):
-        if mod not in PTMmap:
-            raise UnknownModificationError(mod)
-        mods.append((int(pos), PTMmap[mod]))
-    return mods
-
-
 def apply_mods(peptide, mods, PTMmap):
     """
     Takes a peptide sequence and a set of modifications. Returns the modified
@@ -639,8 +624,18 @@ def apply_mods(peptide, mods, PTMmap):
     version are hard coded in ms2pipfeatures_c.c for now.
     """
     modpeptide = np.array(peptide[:], dtype=np.uint16)
-    for pos, mod in mods:
-        modpeptide[pos] = mod
+
+    if mods != "-":
+        l = mods.split("|")
+        if len(l) % 2 != 0:
+            raise InvalidModificationFormattingError(mods)
+        for i in range(0, len(l), 2):
+            tl = l[i + 1]
+            if tl in PTMmap:
+                modpeptide[int(l[i])] = PTMmap[tl]
+            else:
+                raise UnknownModificationError(tl)
+
     return modpeptide
 
 
@@ -788,7 +783,10 @@ class MS2PIP:
             matched_spectra = self._match_spectra(results)
             self._write_matched_spectra(matched_spectra)
         else:
-            results = self._process_peptides()
+            if "xgboost_model_files" in MODELS[self.model]:
+                results = self._process_peptides_xgb()
+            else:
+                results = self._process_peptides()
 
             if self.add_retention_time:
                 self._predict_retention_times()
@@ -844,8 +842,6 @@ class MS2PIP:
     amino acids, or containing B, J, O, U, X or Z).",
                 num_pep_filtered,
             )
-
-        data['modifications'] = data['modifications'].apply(parse_mods, args=(self.mods.ptm_ids,))
 
         if len(data) == 0:
             raise NoValidPeptideSequencesError()
@@ -987,6 +983,14 @@ class MS2PIP:
             titles,
             process_peptides,
             (self.afile, self.modfile, self.modfile2, self.mods.ptm_ids, self.model),
+        )
+
+    def _process_peptides_xgb(self):
+        """Process peptides and get predictions directly from XGBoost models."""
+        ms2pip_pyx.ms2pip_init(self.afile, self.modfile, self.modfile2)
+
+        return process_peptides_xgb(
+            self.data, MODELS[self.model], self.mods.ptm_ids, self.num_cpu
         )
 
     def _write_predictions(self, all_preds):
