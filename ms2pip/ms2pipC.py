@@ -8,8 +8,10 @@ import multiprocessing.dummy
 import os
 import sys
 from random import shuffle
+import ms2pip
 
 import numpy as np
+import xgboost as xgb
 import pandas as pd
 from scipy.stats import pearsonr
 
@@ -27,6 +29,7 @@ from ms2pip.ms2pip_tools import calc_correlations, spectrum_output
 from ms2pip.peptides import (AMINO_ACID_IDS, Modifications,
                              write_amino_accid_masses)
 from ms2pip.retention_time import RetentionTime
+from ms2pip.predict_xgboost import _get_ms2pip_data_for_xgb, process_peptides_xgb
 
 logger = logging.getLogger("ms2pip")
 
@@ -86,6 +89,32 @@ MODELS = {
         "ion_types": ["B", "Y", "B2", "Y2"],
         "peaks_version": "ch2",
         "features_version": "normal",
+    },
+    "HCD2021": {
+        "id": 9,
+        "ion_types": ["B", "Y"],
+        "peaks_version": "general",
+        "features_version": "normal",
+        "xgboost_model_files": {
+            "b": "/home/compomics/arthur/ms2pip_c/ms2pip/models_xgboost/model_20210416_HCD_B.xgboost",
+            "y": "/home/compomics/arthur/ms2pip_c/ms2pip/models_xgboost/model_20210416_HCD_Y.xgboost",
+        }
+    },
+    "HCD2021fast": {
+        "id": 10,
+        "ion_types": ["B", "Y"],
+        "peaks_version": "general",
+        "features_version": "normal",
+    },
+    "HCD-HLA1": {
+        "id": 11,
+        "ion_types": ["B", "Y"],
+        "peaks_version": "general",
+        "features_version": "normal",
+        "xgboost_model_files": {
+            "b": "/home/compomics/arthur/ms2pip_c/ms2pip/models_xgboost/model_20210316_HCD_HLA1_B.xgboost",
+            "y": "/home/compomics/arthur/ms2pip_c/ms2pip/models_xgboost/model_20210316_HCD_HLA1_Y.xgboost",
+        }
     },
 }
 
@@ -200,7 +229,6 @@ def process_spectra(
     the feature vectors are returned, or a DataFrame with the predicted and
     empirical intensities.
     """
-
     ms2pip_pyx.ms2pip_init(afile, modfile, modfile2)
 
     # transform pandas datastructure into dictionary for easy access
@@ -236,9 +264,8 @@ def process_spectra(
     charge_buf = []
     pepid_buf = []
 
-    if tableau:
-        ft = open("ms2pip_tableau.%i" % worker_num, "w")
-        ft2 = open("stats_tableau.%i" % worker_num, "w")
+    ft = open("ms2pip_tableau.%i" % worker_num, "w")
+    ft2 = open("stats_tableau.%i" % worker_num, "w")
 
     title = ""
     charge = 0
@@ -337,7 +364,15 @@ def process_spectra(
 
                 model_id = MODELS[model]["id"]
                 peaks_version = MODELS[model]["peaks_version"]
-
+                if "xgboost_model_files" in MODELS[model].keys():
+                    xgb_B = xgb.Booster({"nthread": 1})
+                    xgb_B.load_model(MODELS[model]["xgboost_model_files"]["b"])
+                    xgb_Y = xgb.Booster({"nthread": 1})
+                    xgb_Y.load_model(MODELS[model]["xgboost_model_files"]["y"])
+                    XGB_models = {
+                        "b" : xgb_B,
+                        "y" : xgb_Y
+                    }
                 # TODO: Check if 30 is good default CE!
                 # RG: removed `if ce == 0` in get_vector, split up into two functions
                 colen = 30
@@ -525,9 +560,23 @@ def process_spectra(
                     target_buf.append([np.array(t, dtype=np.float32) for t in targets])
                     mzs = ms2pip_pyx.get_mzs(modpeptide, peaks_version)
                     mz_buf.append([np.array(m, dtype=np.float32) for m in mzs])
-                    predictions = ms2pip_pyx.get_predictions(
-                        peptide, modpeptide, charge, model_id, peaks_version, colen
-                    )  # SD: added colen
+                    if "xgboost_model_files" in MODELS[model].keys():
+                        xgb_vector = np.array(ms2pip_pyx.get_vector(peptide, modpeptide, charge), dtype=np.uint16)
+                        xgb_vector = xgb.DMatrix(xgb_vector)
+                        predictions = []
+                        for ion_type, model_file in XGB_models.items():
+                            preds = model_file.predict(xgb_vector)
+                            if ion_type in ["x", "y", "z"]:
+                                preds = list(np.array(preds[::-1], dtype=np.float32))
+                            elif ion_type in ["a", "b", "c"]:
+                                preds = list(np.array(preds, dtype=np.float32))
+                            else:
+                                raise ValueError(f"Unsupported ion_type: {ion_type}")
+                            predictions.append(preds)
+                    else:
+                        predictions = ms2pip_pyx.get_predictions(
+                            peptide, modpeptide, charge, model_id, peaks_version, colen
+                        ) # SD: added colen
                     prediction_buf.append(
                         [np.array(p, dtype=np.float32) for p in predictions]
                     )
@@ -765,7 +814,10 @@ class MS2PIP:
             matched_spectra = self._match_spectra(results)
             self._write_matched_spectra(matched_spectra)
         else:
-            results = self._process_peptides()
+            if "xgboost_model_files" in MODELS[self.model]:
+                results = self._process_peptides_xgb()
+            else:
+                results = self._process_peptides()
 
             if self.add_retention_time:
                 self._predict_retention_times()
@@ -962,6 +1014,14 @@ class MS2PIP:
             titles,
             process_peptides,
             (self.afile, self.modfile, self.modfile2, self.mods.ptm_ids, self.model),
+        )
+
+    def _process_peptides_xgb(self):
+        """Process peptides and get predictions directly from XGBoost models."""
+        ms2pip_pyx.ms2pip_init(self.afile, self.modfile, self.modfile2)
+
+        return process_peptides_xgb(
+            self.data, MODELS[self.model], self.mods.ptm_ids, self.num_cpu
         )
 
     def _write_predictions(self, all_preds):
