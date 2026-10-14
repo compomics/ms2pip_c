@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from logging import getLogger
 from pathlib import Path
+
 import numpy as np
 from psm_utils import PSM
 from pydantic import BaseModel, ConfigDict
@@ -13,6 +14,18 @@ from ms2pip.correlation import pearson
 from ms2pip.spectrum import ObservedSpectrum, PredictedSpectrum
 
 logger = getLogger(__name__)
+
+
+def _concatenate_ion_intensities(
+    intensities: dict[str, np.ndarray], reference: dict[str, np.ndarray]
+) -> np.ndarray:
+    """Concatenate intensities in the reference ion order, checking ion identities and lengths."""
+    if intensities.keys() != reference.keys():
+        raise ValueError("Ion types do not match.")
+    for ion_type, ions in reference.items():
+        if len(intensities[ion_type]) != len(ions):
+            raise ValueError(f"Number of {ion_type} ions does not match.")
+    return np.concatenate([intensities[ion_type] for ion_type in reference])
 
 
 class ProcessingResult(BaseModel):
@@ -60,7 +73,7 @@ class ProcessingResult(BaseModel):
         peak_order = np.argsort(mz)
 
         if self.predicted_intensity:
-            pred_int = np.concatenate(list(self.predicted_intensity.values()))
+            pred_int = _concatenate_ion_intensities(self.predicted_intensity, self.theoretical_mz)
             predicted = PredictedSpectrum(
                 mz=mz[peak_order],
                 intensity=pred_int[peak_order],
@@ -73,7 +86,7 @@ class ProcessingResult(BaseModel):
             predicted = None
 
         if self.observed_intensity:
-            obs_int = np.concatenate(list(self.observed_intensity.values()))
+            obs_int = _concatenate_ion_intensities(self.observed_intensity, self.theoretical_mz)
             observed = ObservedSpectrum(
                 mz=mz[peak_order],
                 intensity=obs_int[peak_order],
@@ -131,7 +144,9 @@ def calculate_correlations(results: list[ProcessingResult]) -> None:
         if result.predicted_intensity is None or result.observed_intensity is None:
             continue
         pred_int = np.concatenate(list(result.predicted_intensity.values()))
-        obs_int = np.concatenate(list(result.observed_intensity.values()))
+        obs_int = _concatenate_ion_intensities(
+            result.observed_intensity, result.predicted_intensity
+        )
         result.correlation = pearson(pred_int, obs_int)
 
 
